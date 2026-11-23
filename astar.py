@@ -1,442 +1,156 @@
-
 """
 astar.py - Algoritmo A* para el metro de Monterrey (Metrorrey)
-Calcula el trayecto óptimo entre dos estaciones de las líneas 1, 2 y 3.
-Cada nodo representa una pareja estación-línea.
-Los transbordos se representan mediante arcos entre nodos
-de una misma estación pertenecientes a líneas diferentes.
-FUNCIONES DE EVALUACIÓN
-    g(n) = coste real acumulado desde el origen hasta n.
-    h(n) = distancia en línea recta hasta el destino / velocidad máxima.
-    f(n) = g(n) + h(n).
-ALGORITMOS DISPONIBLES
-    A*:       f(n) = g(n) + h(n)
-    Voraz:    f(n) = h(n)
-    Dijkstra: f(n) = g(n)
-La heurística de A* es minorante y consistente, por lo que
-el algoritmo encuentra una solución óptima si existe.
 """
-from __future__ import annotations
 import heapq
-import itertools
-import math
+import sys
 import unicodedata
-from dataclasses import dataclass, field
-from typing import Callable, Optional
-R_TIERRA_KM = 6371.0088
-ALGORITMOS = ("astar", "voraz", "dijkstra")
+from math import radians, sin, cos, asin, sqrt
+from grafo import cargar_estaciones, cargar_conexiones, construir_grafo
 
-@dataclass
-class Arista:
-    origen: str
-    destino: str
-    linea_origen: str
-    linea_destino: str
-    minutos: float
-    tipo: str
-    origen_info: dict = field(default_factory=dict)
-    destino_info: dict = field(default_factory=dict)
+def normalizar(texto):
+    """Convierte el texto a minúsculas y elimina las tildes."""
+    texto = unicodedata.normalize("NFD", str(texto).strip().lower())
+    return "".join(letra for letra in texto
+                   if unicodedata.category(letra) != "Mn" )
 
 
-@dataclass
-class Paso:
-    arista: Arista
-    coste: float
-
-
-@dataclass
-class Resultado:
-    encontrado: bool
-    camino: list = field(default_factory=list)
-    pasos: list = field(default_factory=list)
-    coste_total: float = math.inf
-    transbordos: int = 0
-    nodos_expandidos: int = 0
-    algoritmo: str = "astar"
-    v_max_km_min: float = 0.0
-
-    def nombres(self, estaciones) -> list:
-        nombres = []
-        for nodo in self.camino:
-            nombre = estaciones[nodo]["nombre"]
-            if not nombres or nombres[-1] != nombre:
-                nombres.append(nombre)
-        return nombres
-
-    def resumen(self, estaciones) -> str:
-        """Genera un resumen legible del recorrido."""
-        if not self.encontrado:
-            return "No existe ruta entre las estaciones indicadas."
-        filas = []
-        for paso in self.pasos:
-            arista = paso.arista
-            origen = estaciones[arista.origen]["nombre"]
-            destino = estaciones[arista.destino]["nombre"]
-            if arista.tipo == "tramo":
-                filas.append(
-                    f"  [L{arista.linea_destino}] "
-                    f"{origen} -> {destino} "
-                    f"({paso.coste:.2f} min)"
-                )
-            else:
-                filas.append(
-                    f"  TRANSBORDO en {origen}: "
-                    f"L{arista.linea_origen} -> "
-                    f"L{arista.linea_destino} "
-                    f"({paso.coste:.2f} min)"
-                )
-        cabecera = (
-            f"{self.algoritmo.upper()}: "
-            f"{self.coste_total:.2f} min, "
-            f"{self.transbordos} transbordo(s), "
-            f"{self.nodos_expandidos} nodos expandidos"
-        )
-        return cabecera + "\n" + "\n".join(filas)
-
-
-def _norm(texto: str) -> str:
-    texto = unicodedata.normalize("NFD", texto.strip().lower())
-    return "".join(
-        c for c in texto
-        if unicodedata.category(c) != "Mn"
-    )
-
-def ids_de_estacion(estaciones: dict, estacion: str) -> list:
-    """Si una estación tiene varias líneas, devuelve todos sus nodos."""
-
-    if estacion in estaciones:
-        return [estacion]
-    buscado = _norm(estacion)
-    ids = [
-        identificador
-        for identificador, datos in estaciones.items()
-        if _norm(datos["nombre"]) == buscado
-    ]
-
-    if not ids:
-        raise ValueError(f"Estación desconocida: {estacion}")
+def ids_por_nombre(estaciones, nombre):
+    ids = []
+    for id_estacion, fila in estaciones.items():
+        if normalizar(fila["nombre"]) == normalizar(nombre):
+            ids.append(id_estacion)
     return ids
 
+def distancia_km(estaciones, a, b):
+    """Calcula la distancia geográfica."""
+    lat1 = radians(float(estaciones[a]["latitud"]))
+    lon1 = radians(float(estaciones[a]["longitud"]))
+    lat2 = radians(float(estaciones[b]["latitud"]))
+    lon2 = radians(float(estaciones[b]["longitud"]))
+    h = ( sin((lat2 - lat1) / 2) ** 2
+        + cos(lat1) * cos(lat2)
+        * sin((lon2 - lon1) / 2) ** 2)
+    h = max(0.0, min(1.0, h))
+    return 2 * 6371 * asin(sqrt(h))
 
 
-def _validar_grafo(estaciones: dict, grafo: dict):
-    """Comprueba que el grafo y sus costes sean válidos."""
-    if not estaciones:
-        raise ValueError("No hay estaciones cargadas.")
-    if not grafo:
-        raise ValueError("El grafo está vacío.")
-    for nodo, sucesores in grafo.items():
-        if nodo not in estaciones:
-            raise ValueError(f"Nodo desconocido: {nodo}")
-        for destino, minutos in sucesores:
-            if destino not in estaciones:
+def velocidad_maxima(estaciones, conexiones):
+    maxima = 0.0
+    for conexion in conexiones:
+        if normalizar(conexion["linea"]) != "transbordo":
+            origen = conexion["origen"]
+            destino = conexion["destino"]
+            minutos = float(conexion["minutos"])
+            if minutos <= 0:
                 raise ValueError(
-                    f"La conexión {nodo} -> {destino} "
-                    "apunta a una estación inexistente."
+                    "Los tiempos de las conexiones deben ser positivos."
                 )
+            velocidad = (distancia_km(estaciones, origen, destino) / minutos)
+            maxima = max(maxima, velocidad)
+    return maxima
 
-            if not math.isfinite(float(minutos)) or minutos <= 0:
-                raise ValueError(
-                    f"Coste inválido en la conexión "
-                    f"{nodo} -> {destino}: {minutos}"
-                )
+def a_star(estaciones, grafo, origenes, destinos, v_max):
 
-
-
-def haversine_km(lat1: float, lon1: float,
-                 lat2: float, lon2: float) -> float:
-    """Calcula la distancia en línea recta entre dos coordenadas."""
-    p1 = math.radians(lat1)
-    p2 = math.radians(lat2)
-    dp = p2 - p1
-    dl = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dp / 2) ** 2
-        + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    )
-    return 2 * R_TIERRA_KM * math.asin(math.sqrt(a))
-
-def _dist_nodos(estaciones: dict, a: str, b: str) -> float:
-    """Calcula la distancia geográfica entre dos nodos."""
-    ea = estaciones[a]
-    eb = estaciones[b]
-    return haversine_km(
-        float(ea["latitud"]),
-        float(ea["longitud"]),
-        float(eb["latitud"]),
-        float(eb["longitud"])
-    )
-
-
-def velocidad_maxima(estaciones: dict, grafo: dict) -> float:
-    """
-    Calcula la velocidad máxima observada en los arcos.
-    Esta velocidad permite construir una heurística minorante.
-    """
-    v_max = 0.0
-    for origen, sucesores in grafo.items():
-        for destino, minutos in sucesores:
-            distancia = _dist_nodos(
-                estaciones, origen, destino
-            )
-            velocidad = distancia / minutos
-            v_max = max(v_max, velocidad)
-
-    if v_max <= 0 or not math.isfinite(v_max):
-        raise ValueError(
-            "No se puede calcular la velocidad máxima."
-        )
-    return v_max
-
-
-def heuristica(estaciones: dict, nodo: str,
-               meta: str, v_max: float) -> float:
-    """ h(n) = distancia en línea recta hasta la meta / v_max. """
-    distancia = _dist_nodos(estaciones, nodo, meta)
-    return distancia / v_max
-
-
-def _sucesores(estaciones: dict, grafo: dict, nodo: str):
-    """Genera las aristas que salen de un nodo."""
-    for destino, minutos in grafo[nodo]:
-        linea_origen = estaciones[nodo]["linea"]
-        linea_destino = estaciones[destino]["linea"]
-        tipo = (
-            "tramo"
-            if linea_origen == linea_destino
-            else "transbordo"
-        )
-        yield Arista(
-            nodo,
-            destino,
-            linea_origen,
-            linea_destino,
-            minutos,
-            tipo,
-            estaciones[nodo],
-            estaciones[destino]
-        )
-
-
-def _coste_aplicado(arista: Arista, contexto: dict,
-                    coste_fn: Optional[Callable]) -> float:
-    """
-    Calcula el coste real de una arista.
-    """
-    if coste_fn is None:
-        return arista.minutos
-    ajustado = float(coste_fn(arista, contexto))
-    if not math.isfinite(ajustado):
-        raise ValueError("La función de costes ha devuelto un valor inválido.")
-    return max(arista.minutos, ajustado)
-
-
-def astar(estaciones: dict, grafo: dict,
-          origen: str, destino: str,
-          contexto: Optional[dict] = None,
-          coste_fn: Optional[Callable] = None,
-          algoritmo: str = "astar") -> Resultado:
-    """
-    Busca el camino de menor coste entre dos estaciones.
-    """
-    if algoritmo not in ALGORITMOS:
-        raise ValueError(
-            f"Algoritmo no válido. Opciones: {ALGORITMOS}"
-        )
-    _validar_grafo(estaciones, grafo)
-    contexto = contexto or {}
-    ids_origen = ids_de_estacion(estaciones, origen)
-    ids_meta = set(ids_de_estacion(estaciones, destino))
-    meta_ref = next(iter(ids_meta))
-    v_max = velocidad_maxima(estaciones, grafo)
-    cache_h = {}
-
+    if not origenes or not destinos:
+        return None, float("inf")
+    destinos = set(destinos)
     def h(nodo):
-        if algoritmo == "dijkstra":
+        """Estima el tiempo restante hasta el destino más cercano."""
+        if v_max <= 0:
             return 0.0
-        if nodo not in cache_h:
-            cache_h[nodo] = heuristica(
-                estaciones, nodo, meta_ref, v_max
-            )
-        return cache_h[nodo]
-
-    def f(g, nodo):
-        if algoritmo == "voraz":
-            return h(nodo)
-        return g + h(nodo)
-
-
-    contador = itertools.count()
-    abierta = []
-    g_mejor = {}
+        distancia = min(
+            distancia_km(estaciones, nodo, destino)
+            for destino in destinos)
+        return distancia / v_max
+    abiertos = []
+    g = {}
     padre = {}
 
-    cerrada = set()
-    expandidos = 0
-
-    for nodo_inicial in ids_origen:
-        g_mejor[nodo_inicial] = 0.0
-        padre[nodo_inicial] = None
+    for origen in origenes:
+        g[origen] = 0.0
         heapq.heappush(
-            abierta,
-            (
-                f(0.0, nodo_inicial),
-                h(nodo_inicial),
-                next(contador),
-                0.0,
-                nodo_inicial
-            )
+            abiertos,
+            (h(origen), 0.0, origen)
         )
 
-
-    while abierta:
-        _, _, _, g, nodo = heapq.heappop(abierta)
-
-        if g != g_mejor.get(nodo):
+    while abiertos:
+        f_actual, g_actual, actual = heapq.heappop(abiertos)
+        if g_actual > g.get(actual, float("inf")):
             continue
-        if nodo in cerrada:
-            continue
-        if nodo in ids_meta:
+        if actual in destinos:
+            camino = [actual]
+            while camino[-1] in padre:
+                camino.append(padre[camino[-1]])
+            camino.reverse()
+            return camino, g_actual
 
-            return _reconstruir(
-                nodo,
-                padre,
-                g,
-                expandidos,
-                algoritmo,
-                v_max
-            )
+        for vecino, minutos in grafo.get(actual, []):
+            minutos = float(minutos)
+            if minutos < 0:
+                raise ValueError("A* necesita costes no negativos.")
 
-        cerrada.add(nodo)
-        expandidos += 1
-
-        for arista in _sucesores(estaciones, grafo, nodo):
-            sucesor = arista.destino
-            if sucesor in cerrada:
-                continue
-            coste = _coste_aplicado(
-                arista,
-                contexto,
-                coste_fn
-            )
-
-            g_nuevo = g + coste
-            if g_nuevo < g_mejor.get(sucesor, math.inf):
-                g_mejor[sucesor] = g_nuevo
-                padre[sucesor] = (
-                    nodo,
-                    Paso(arista, coste)
-                )
+            g_nuevo = g_actual + minutos
+            if g_nuevo < g.get(vecino, float("inf")):
+                g[vecino] = g_nuevo
+                padre[vecino] = actual
+                f_nuevo = g_nuevo + h(vecino)
                 heapq.heappush(
-                    abierta,
-                    (
-                        f(g_nuevo, sucesor),
-                        h(sucesor),
-                        next(contador),
-                        g_nuevo,
-                        sucesor
-                    )
+                    abiertos,
+                    (f_nuevo, g_nuevo, vecino)
                 )
-
-    return Resultado(
-        encontrado=False,
-        nodos_expandidos=expandidos,
-        algoritmo=algoritmo,
-        v_max_km_min=v_max
-    )
+    return None, float("inf")
 
 
+def mostrar_ruta(estaciones, camino, minutos):
+    """Muestra recorrido y transbordos."""
+    if camino is None:
+        print("No existe una ruta entre las estaciones seleccionadas.")
+        return
+    transbordos = 0
+    print("\n RUTA ÓPTIMA : \n")
+    for i, id_estacion in enumerate(camino):
+        actual = estaciones[id_estacion]
+        print("Línea", actual["linea"],":", actual["nombre"])
+        if i + 1 < len(camino):
+            siguiente = estaciones[camino[i + 1]]
+            if normalizar(siguiente["nombre"]) == normalizar(actual["nombre"]):
+                transbordos += 1
+                print(  " Transbordo:",actual["linea"], "->",siguiente["linea"])
 
-def _reconstruir(nodo, padre, g,
-                 expandidos, algoritmo, v_max) -> Resultado:
-    """Reconstruye el camino siguiendo los nodos padre."""
-    pasos = []
-    camino = [nodo]
-    while padre[nodo] is not None:
-        nodo, paso = padre[nodo]
-        pasos.append(paso)
-        camino.append(nodo)
-
-    pasos.reverse()
-    camino.reverse()
-
-    transbordos = sum(
-        1 for paso in pasos
-        if paso.arista.tipo == "transbordo"
-    )
-
-    return Resultado(
-        encontrado=True,
-        camino=camino,
-        pasos=pasos,
-        coste_total=g,
-        transbordos=transbordos,
-        nodos_expandidos=expandidos,
-        algoritmo=algoritmo,
-        v_max_km_min=v_max
-    )
-
-
-
-def verificar_consistencia(estaciones: dict,
-                           grafo: dict,
-                           eps: float = 1e-9) -> list:
-    """
-    Comprueba la condición:
-        h(n) <= c(n,m) + h(m)
-    Para todos los arcos y destinos posibles.
-    Devuelve una lista de violaciones.
-    Si está vacía, la heurística es consistente.
-    """
-    _validar_grafo(estaciones, grafo)
-    v_max = velocidad_maxima(estaciones, grafo)
-    malos = []
-    for meta in estaciones:
-        for nodo, sucesores in grafo.items():
-            for destino, minutos in sucesores:
-                h_n = heuristica(
-                    estaciones, nodo, meta, v_max
-                )
-                h_m = heuristica(
-                    estaciones, destino, meta, v_max
-                )
-                if h_n > minutos + h_m + eps:
-                    malos.append(
-                        (nodo, destino, meta)
-                    )
-    return malos
+    print("Tiempo total: %.2f minutos" % minutos)
+    print("Número de transbordos:", transbordos)
 
 
 if __name__ == "__main__":
-    import os
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    from grafo import (
-        cargar_estaciones,
-        cargar_conexiones,
-        construir_grafo
-    )
     estaciones = cargar_estaciones()
     conexiones = cargar_conexiones()
-    grafo = construir_grafo(
-        estaciones,
-        conexiones
+    grafo = construir_grafo(estaciones, conexiones)
+
+    v_max = velocidad_maxima(estaciones, conexiones)
+
+
+    nombre_origen = (
+        sys.argv[1] if len(sys.argv) > 1 else "Talleres"
     )
-    for algoritmo in ALGORITMOS:
-        resultado = astar(
+    nombre_destino = (
+        sys.argv[2] if len(sys.argv) > 2
+        else "Hospital Metropolitano")
+
+    origenes = ids_por_nombre(estaciones, nombre_origen)
+    destinos = ids_por_nombre(estaciones, nombre_destino)
+
+    if not origenes:
+        print("No se ha encontrado el origen:", nombre_origen)
+
+    elif not destinos:
+        print("No se ha encontrado el destino:", nombre_destino)
+
+    else:
+        camino, minutos = a_star(
             estaciones,
             grafo,
-            "Talleres",
-            "Hospital Metropolitano",
-            algoritmo=algoritmo
+            origenes,
+            destinos,
+            v_max
         )
-        print(resultado.resumen(estaciones))
-        print()
-    print(
-        "Velocidad máxima:",
-        round(velocidad_maxima(estaciones, grafo) * 60, 2),
-        "km/h"
-    )
-    print(
-        "Violaciones de consistencia:",
-        verificar_consistencia(estaciones, grafo)
-    )
+        mostrar_ruta(estaciones, camino, minutos)

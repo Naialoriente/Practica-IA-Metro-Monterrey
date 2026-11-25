@@ -2,74 +2,78 @@
 main.py - Integración de carga de grafo, factores extra y algoritmo A*.
 Incluye validación de entradas (control de errores).
 """
-
+import sys
 from grafo import cargar_estaciones, cargar_conexiones, construir_grafo
-from costes import calcular_coste
-from astar import astar, ids_de_estacion
+from astar import ids_por_nombre, velocidad_maxima, a_star, mostrar_ruta
+from costes import aplicar_recargos_grafo
 
 
-def validar_entrada(estaciones: dict, origen: str, destino: str) -> None:
-    """Valida que los campos no estén vacíos, existan y no sean iguales."""
-    if not origen or not str(origen).strip():
-        raise ValueError("Debes seleccionar o indicar una estación de origen.")
-    if not destino or not str(destino).strip():
-        raise ValueError("Debes seleccionar o indicar una estación de destino.")
+def validar_peticion(estaciones, nombre_origen, nombre_destino):
+    if not nombre_origen or not str(nombre_origen).strip():
+        raise ValueError("Debes indicar una estación de origen.")
+    if not nombre_destino or not str(nombre_destino).strip():
+        raise ValueError("Debes indicar una estación de destino.")
+    if str(nombre_origen).strip().lower() == str(nombre_destino).strip().lower():
+        raise ValueError("El origen y el destino no pueden ser la misma estación.")
 
-    ids_origen = ids_de_estacion(estaciones, str(origen).strip())
-    ids_destino = ids_de_estacion(estaciones, str(destino).strip())
+    origenes = ids_por_nombre(estaciones, nombre_origen)
+    destinos = ids_por_nombre(estaciones, nombre_destino)
 
-    # Comprueba tanto por texto como por nombre normalizado de estación
-    nombres_origen = {estaciones[i]["nombre"].strip().lower() for i in ids_origen}
-    nombres_destino = {estaciones[i]["nombre"].strip().lower() for i in ids_destino}
+    if not origenes:
+        raise ValueError(f"No se ha encontrado el origen: {nombre_origen}")
+    if not destinos:
+        raise ValueError(f"No se ha encontrado el destino: {nombre_destino}")
 
-    if str(origen).strip().lower() == str(destino).strip().lower() or nombres_origen == nombres_destino:
-        raise ValueError("La estación de origen y la de destino no pueden ser la misma.")
+    return origenes, destinos
 
 
-def ejecutar_busqueda(
-    origen: str,
-    destino: str,
-    hora: str = "12:00",
-    dia: str = "lunes",
-    ruta_accesible: bool = False,
-    algoritmo: str = "astar",
+def calcular_ruta_metrorrey(
+    nombre_origen,
+    nombre_destino,
+    dia_semana="lunes",
+    hora="12:00",
+    ruta_accesible=False,
 ):
-    """Carga el grafo, valida la entrada y ejecuta la búsqueda con costes extra."""
     estaciones = cargar_estaciones()
     conexiones = cargar_conexiones()
-    grafo = construir_grafo(estaciones, conexiones)
+    grafo_base = construir_grafo(estaciones, conexiones)
 
-    validar_entrada(estaciones, origen, destino)
+    origenes, destinos = validar_peticion(estaciones, nombre_origen, nombre_destino)
 
-    contexto = {
-        "hora": hora,
-        "dia": dia,
-        "ruta_accesible": bool(ruta_accesible),
-    }
-
-    resultado = astar(
+    grafo_con_recargos = aplicar_recargos_grafo(
+        grafo=grafo_base,
         estaciones=estaciones,
-        grafo=grafo,
-        origen=str(origen).strip(),
-        destino=str(destino).strip(),
-        contexto=contexto,
-        coste_fn=calcular_coste,
-        algoritmo=algoritmo,
+        dia_semana=dia_semana,
+        hora=hora,
+        ruta_accesible=ruta_accesible,
     )
-    return estaciones, resultado
+
+    v_max = velocidad_maxima(estaciones, conexiones)
+    camino, minutos = a_star(
+        estaciones,
+        grafo_con_recargos,
+        origenes,
+        destinos,
+        v_max,
+    )
+    return estaciones, camino, minutos
 
 
 if __name__ == "__main__":
-    # Ejemplo de prueba rápida por consola
+    origen = sys.argv[1] if len(sys.argv) > 1 else "Talleres"
+    destino = sys.argv[2] if len(sys.argv) > 2 else "Hospital Metropolitano"
+    dia = sys.argv[3] if len(sys.argv) > 3 else "lunes"
+    hora = sys.argv[4] if len(sys.argv) > 4 else "08:15"
+    accesible = (sys.argv[5].lower() in {"1", "si", "true"}) if len(sys.argv) > 5 else True
+
     try:
-        estaciones, res = ejecutar_busqueda(
-            origen="Talleres",
-            destino="Hospital Metropolitano",
-            hora="08:15",
-            dia="lunes",
-            ruta_accesible=True,
-            algoritmo="astar",
+        estaciones, camino, minutos = calcular_ruta_metrorrey(
+            nombre_origen=origen,
+            nombre_destino=destino,
+            dia_semana=dia,
+            hora=hora,
+            ruta_accesible=accesible,
         )
-        print(res.resumen(estaciones))
-    except ValueError as err:
-        print(f"Error de entrada: {err}")
+        mostrar_ruta(estaciones, camino, minutos)
+    except ValueError as e:
+        print("Error:", e)
